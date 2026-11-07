@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	congestionExt "github.com/apernet/quic-go/congestion"
 	"github.com/apernet/quic-go/internal/monotime"
 	"github.com/apernet/quic-go/internal/protocol"
 	"github.com/apernet/quic-go/internal/utils"
@@ -161,4 +162,86 @@ func TestReceivedPacketHandlerAckPolicy(t *testing.T) {
 		require.NoError(t, h.ReceivedPacket(4, protocol.ECNNon, protocol.Encryption1RTT, now, true))
 		require.NotNil(t, h.GetAckFrame(protocol.Encryption1RTT, now, true))
 	})
+}
+
+// countingCC is a congestion controller set through SetCongestionControl, as Hysteria sets BBR and Brutal.
+type countingCC struct{ congestionEvents int }
+
+func (c *countingCC) SetRTTStatsProvider(congestionExt.RTTStatsProvider)  {}
+func (c *countingCC) TimeUntilSend(congestionExt.ByteCount) monotime.Time { return 0 }
+func (c *countingCC) HasPacingBudget(monotime.Time) bool                  { return true }
+func (c *countingCC) OnPacketSent(monotime.Time, congestionExt.ByteCount, congestionExt.PacketNumber, congestionExt.ByteCount, bool) {
+}
+func (c *countingCC) CanSend(congestionExt.ByteCount) bool { return true }
+func (c *countingCC) MaybeExitSlowStart()                  {}
+func (c *countingCC) OnPacketAcked(congestionExt.PacketNumber, congestionExt.ByteCount, congestionExt.ByteCount, monotime.Time) {
+}
+func (c *countingCC) OnCongestionEvent(congestionExt.PacketNumber, congestionExt.ByteCount, congestionExt.ByteCount) {
+	c.congestionEvents++
+}
+func (c *countingCC) OnRetransmissionTimeout(bool)               {}
+func (c *countingCC) SetMaxDatagramSize(congestionExt.ByteCount) {}
+func (c *countingCC) InSlowStart() bool                          { return false }
+func (c *countingCC) InRecovery() bool                           { return false }
+func (c *countingCC) GetCongestionWindow() congestionExt.ByteCount {
+	return 1 << 20
+}
+
+// spec/001-loss-recovery C3: losses and spurious losses counted whatever the controller, once each.
+func TestSentPacketHandlerLossCounters(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		var stats utils.ConnectionStats
+		sph := newRecoveryTestHandler(utils.NewRTTStats(), &stats)
+		var cc countingCC
+		if custom {
+			sph.SetCongestionControl(&cc)
+		}
+		sph.DropPackets(protocol.EncryptionInitial, monotime.Now())
+		sph.DropPackets(protocol.EncryptionHandshake, monotime.Now())
+
+		var packets packetTracker
+		now := monotime.Now()
+		send := func(mtuProbe bool) protocol.PacketNumber {
+			pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+			sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.Encryption1RTT, protocol.ECNNon, 1000, mtuProbe, false)
+			return pn
+		}
+		var pns []protocol.PacketNumber
+		pns = append(pns, send(true)) // a lost MTU probe is no congestion signal and not counted
+		for range 5 {
+			pns = append(pns, send(false))
+		}
+		_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[4])}, protocol.Encryption1RTT, now.Add(time.Second))
+		require.NoError(t, err)
+		require.Equal(t, []protocol.PacketNumber{pns[0], pns[1]}, packets.Lost)
+		require.Equal(t, uint64(1), stats.PacketsLost.Load(), "custom controller: %t", custom)
+		require.Equal(t, uint64(1000), stats.BytesLost.Load())
+		if custom {
+			require.Equal(t, 1, cc.congestionEvents)
+		}
+
+		// pns[1] arrives after all: a spurious loss
+		_, err = sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[1], pns[2], pns[3], pns[4], pns[5])}, protocol.Encryption1RTT, now.Add(time.Second+time.Millisecond))
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), stats.SpuriousLosses.Load())
+		require.Equal(t, uint64(1), stats.PacketsLost.Load())
+	}
+}
+
+func TestSentPacketHandlerPTOCounter(t *testing.T) {
+	var stats utils.ConnectionStats
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(100*time.Millisecond, 0)
+	sph := newRecoveryTestHandler(rttStats, &stats)
+	sph.DropPackets(protocol.EncryptionInitial, monotime.Now())
+	sph.DropPackets(protocol.EncryptionHandshake, monotime.Now())
+	var packets packetTracker
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(monotime.Now(), pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.Encryption1RTT, protocol.ECNNon, 1000, false, false)
+	for i := range 3 {
+		require.Equal(t, uint64(i), stats.PTOCount.Load())
+		require.NoError(t, sph.OnLossDetectionTimeout(sph.GetLossDetectionTimeout()))
+	}
+	require.Equal(t, uint64(3), stats.PTOCount.Load())
+	require.Zero(t, stats.PacketsLost.Load(), "a PTO is a probe, not a loss")
 }

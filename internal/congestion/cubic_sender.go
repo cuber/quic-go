@@ -197,8 +197,7 @@ func (c *cubicSender) OnPacketAcked(
 }
 
 func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lostBytes, priorInFlight protocol.ByteCount) {
-	c.connStats.PacketsLost.Add(1)
-	c.connStats.BytesLost.Add(uint64(lostBytes))
+	// PacketsLost and BytesLost are counted by the sent packet handler, whatever the controller (spec/001-loss-recovery C3).
 
 	// TCP NewReno (RFC6582) says that once a loss occurs, any losses in packets
 	// already sent should be treated as a single loss event, since it's expected.

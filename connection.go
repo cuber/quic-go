@@ -877,6 +877,13 @@ type ConnectionStats struct {
 	// CopiesSkipped is the number of copies not sent because the send queue was full,
 	// or because the copies waiting for DuplicateDelay already took their budget.
 	CopiesSkipped uint64
+	// SpuriousLosses is the number of packets declared lost and acknowledged later.
+	SpuriousLosses uint64
+	// PTOCount is the number of probe timeouts that expired.
+	PTOCount uint64
+	// DuplicatesReceived is the number of packets dropped as (potentially) duplicate:
+	// copies and network duplicates. They are not included in PacketsReceived.
+	DuplicatesReceived uint64
 }
 
 func (c *Conn) ConnectionStats() ConnectionStats {
@@ -893,9 +900,12 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 		BytesLost:       c.connStats.BytesLost.Load(),
 		PacketsLost:     c.connStats.PacketsLost.Load(),
 
-		CopiesSent:    c.connStats.CopiesSent.Load(),
-		CopyBytesSent: c.connStats.CopyBytesSent.Load(),
-		CopiesSkipped: c.connStats.CopiesSkipped.Load(),
+		CopiesSent:         c.connStats.CopiesSent.Load(),
+		CopyBytesSent:      c.connStats.CopyBytesSent.Load(),
+		CopiesSkipped:      c.connStats.CopiesSkipped.Load(),
+		SpuriousLosses:     c.connStats.SpuriousLosses.Load(),
+		PTOCount:           c.connStats.PTOCount.Load(),
+		DuplicatesReceived: c.connStats.DuplicatesReceived.Load(),
 	}
 }
 
@@ -1281,6 +1291,7 @@ func (c *Conn) handleShortHeaderPacket(
 	}
 
 	if c.receivedPacketHandler.IsPotentiallyDuplicate(pn, protocol.Encryption1RTT) {
+		c.connStats.DuplicatesReceived.Add(1)
 		c.logger.Debugf("Dropping (potentially) duplicate packet.")
 		if c.qlogger != nil {
 			c.qlogger.RecordEvent(qlog.PacketDropped{
@@ -1432,6 +1443,7 @@ func (c *Conn) handleLongHeaderPacket(p receivedPacket, hdr *wire.Header, datagr
 	}
 
 	if pn := packet.hdr.PacketNumber; c.receivedPacketHandler.IsPotentiallyDuplicate(pn, packet.encryptionLevel) {
+		c.connStats.DuplicatesReceived.Add(1)
 		c.logger.Debugf("Dropping (potentially) duplicate packet.")
 		if c.qlogger != nil {
 			c.qlogger.RecordEvent(qlog.PacketDropped{

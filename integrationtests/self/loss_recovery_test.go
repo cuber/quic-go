@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
+	"github.com/apernet/quic-go/congestion"
 	"github.com/apernet/quic-go/internal/protocol"
 	"github.com/apernet/quic-go/internal/wire"
+	"github.com/apernet/quic-go/monotime"
 	"github.com/apernet/quic-go/qlog"
 	"github.com/apernet/quic-go/testutils/events"
 	"github.com/apernet/quic-go/testutils/simnet"
@@ -125,6 +127,7 @@ func TestLossRecoveryMaxAckDelay(t *testing.T) {
 			dropNext.Store(true)
 			elapsed[tc.maxAckDelay] = pair.roundTrip(t, 0xfe)
 			require.False(t, dropNext.Load())
+			require.NotZero(t, pair.client.ConnectionStats().PTOCount)
 		})
 	}
 	fast, slow := elapsed[2*time.Millisecond], elapsed[0]
@@ -203,12 +206,17 @@ func TestLossRecoveryCopiesBySize(t *testing.T) {
 			return log.record(p) == 0 && dropOriginals.Load()
 		})
 		pair.warmUp(t) // the handshake is confirmed by now
+		// let delayed ACKs and their copies arrive before counting
+		time.Sleep(lossRecoveryRTT + protocol.MaxAckDelayInclGranularity)
+		synctest.Wait()
 		log.reset()
 		before := pair.client.ConnectionStats()
+		serverBefore := pair.server.ConnectionStats()
 		for i := range 5 {
 			pair.roundTrip(t, byte(i))
 		}
-		synctest.Wait() // let the last ACKs go out
+		time.Sleep(lossRecoveryRTT + protocol.MaxAckDelayInclGranularity)
+		synctest.Wait()
 		// every datagram the client sends goes out twice, byte for byte
 		single, double, more := log.counts()
 		require.Zero(t, single)
@@ -216,15 +224,22 @@ func TestLossRecoveryCopiesBySize(t *testing.T) {
 		require.Zero(t, more)
 		after := pair.client.ConnectionStats()
 		require.Equal(t, uint64(double), after.CopiesSent-before.CopiesSent)
+		// the server drops each copy as a duplicate
+		require.Equal(t, uint64(double), pair.server.ConnectionStats().DuplicatesReceived-serverBefore.DuplicatesReceived)
 		require.Equal(t, after.PacketsSent-before.PacketsSent, after.CopiesSent-before.CopiesSent, "copies are not counted as sent packets")
 		require.NotZero(t, after.CopyBytesSent)
 		require.Zero(t, pair.server.ConnectionStats().CopiesSent)
 
-		// losing every original costs nothing: the copies carry the requests
+		// losing every original costs nothing: the copies carry the requests, and nothing is lost
 		dropOriginals.Store(true)
+		duplicates := pair.server.ConnectionStats().DuplicatesReceived
 		for i := range 5 {
 			require.Less(t, pair.roundTrip(t, byte(i)), lossRecoveryRTT+2*time.Millisecond)
 		}
+		time.Sleep(lossRecoveryRTT)
+		synctest.Wait()
+		require.Equal(t, duplicates, pair.server.ConnectionStats().DuplicatesReceived)
+		require.Zero(t, pair.client.ConnectionStats().PacketsLost)
 	})
 }
 
@@ -281,4 +296,52 @@ func TestLossRecoveryTailCopies(t *testing.T) {
 		dropOriginals.Store(true)
 		require.Less(t, pair.roundTrip(t, 1), lossRecoveryRTT+2*time.Millisecond)
 	})
+}
+
+// fixedWindowCC stands in for Hysteria's controllers: set through SetCongestionControl, it replaces Cubic.
+type fixedWindowCC struct{}
+
+func (fixedWindowCC) SetRTTStatsProvider(congestion.RTTStatsProvider)  {}
+func (fixedWindowCC) TimeUntilSend(congestion.ByteCount) monotime.Time { return 0 }
+func (fixedWindowCC) HasPacingBudget(monotime.Time) bool               { return true }
+func (fixedWindowCC) OnPacketSent(monotime.Time, congestion.ByteCount, congestion.PacketNumber, congestion.ByteCount, bool) {
+}
+func (fixedWindowCC) CanSend(inFlight congestion.ByteCount) bool { return inFlight < 64<<10 }
+func (fixedWindowCC) MaybeExitSlowStart()                        {}
+func (fixedWindowCC) OnPacketAcked(congestion.PacketNumber, congestion.ByteCount, congestion.ByteCount, monotime.Time) {
+}
+func (fixedWindowCC) OnCongestionEvent(congestion.PacketNumber, congestion.ByteCount, congestion.ByteCount) {
+}
+func (fixedWindowCC) OnRetransmissionTimeout(bool)              {}
+func (fixedWindowCC) SetMaxDatagramSize(congestion.ByteCount)   {}
+func (fixedWindowCC) InSlowStart() bool                         { return false }
+func (fixedWindowCC) InRecovery() bool                          { return false }
+func (fixedWindowCC) GetCongestionWindow() congestion.ByteCount { return 64 << 10 }
+
+func TestLossRecoveryLossCountedUnderCustomController(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			var n atomic.Int64
+			var lossy atomic.Bool
+			pair := newEchoPair(t, nil, nil, func(toServer bool, _ simnet.Packet) bool {
+				return toServer && lossy.Load() && n.Add(1)%10 == 0
+			})
+			if custom {
+				pair.client.SetCongestionControl(fixedWindowCC{})
+			}
+			pair.warmUp(t)
+			lossy.Store(true)
+			data := make([]byte, 300<<10)
+			_, err := pair.str.Write(data)
+			require.NoError(t, err)
+			_, err = io.ReadFull(pair.str, data)
+			require.NoError(t, err)
+			synctest.Wait()
+			stats := pair.client.ConnectionStats()
+			t.Logf("custom controller %t: %d lost of %d sent, %d spurious", custom, stats.PacketsLost, stats.PacketsSent, stats.SpuriousLosses)
+			require.NotZero(t, stats.PacketsLost)
+			require.NotZero(t, stats.BytesLost)
+			require.LessOrEqual(t, stats.PacketsLost, uint64(n.Load()/10)+stats.SpuriousLosses)
+		})
+	}
 }

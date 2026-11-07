@@ -4,7 +4,7 @@
 - [x] T002 Upstream suite on the unmodified line with Core's toolchain.
 - [x] T003 Series 1: config fields, validation, `LossRecovery()`, recovery parameters (C1; FR-002, FR-003).
 - [x] T004 Series 2: copies (C2; FR-004).
-- [ ] T005 Series 3: counters (C3; FR-005).
+- [x] T005 Series 3: counters (C3; FR-005).
 - [ ] T006 Full suite with Core's toolchain, race on the touched packages; push the line (FR-001).
 
 ## Evidence
@@ -33,3 +33,14 @@
     - `DuplicateTail`: 1 copy for 160 packets of a 200 KiB write, and a lone request whose original is lost
       completes within one round trip.
   - Full suite with go1.27.0: exit 0, 25 packages ok; `-race` on the root package.
+- 2026-11-07 T005:
+  - Unit (`internal/ackhandler/loss_recovery_test.go`): with Cubic and with a controller set through
+    `SetCongestionControl`, a lost packet counts once in `PacketsLost` and `BytesLost` and reaches the controller
+    once, a lost MTU probe counts nothing, a packet acknowledged after it was declared lost counts in
+    `SpuriousLosses`; each PTO expiration counts in `PTOCount`, and a PTO is no loss.
+  - Integration: the lost request of `TestLossRecoveryMaxAckDelay` counts a PTO; with copies, the server's
+    `DuplicatesReceived` equals the copies sent, and when every original is dropped it stays put and the client
+    loses nothing; dropping every 10th client datagram of a 300 KiB write counts 25 losses under Cubic and 24 under
+    a custom controller, where upstream counted 0.
+  - Full suite with go1.27.0: exit 0, 25 packages ok; `-race` on the root package, `internal/ackhandler`,
+    `internal/congestion`, `internal/utils` and `integrationtests/self`.

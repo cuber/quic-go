@@ -587,6 +587,7 @@ func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime mon
 			spuriousLosses = append(spuriousLosses, pn)
 		}
 	}
+	h.connStats.SpuriousLosses.Add(uint64(len(spuriousLosses)))
 	for _, pn := range spuriousLosses {
 		h.lostPackets.Delete(pn)
 	}
@@ -931,6 +932,8 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 				h.removeFromBytesInFlight(p)
 				h.queueFramesForRetransmission(p)
 				if !p.IsPathMTUProbePacket {
+					h.connStats.PacketsLost.Add(1)
+					h.connStats.BytesLost.Add(uint64(p.Length))
 					cc.OnCongestionEvent(pn, p.Length, priorInFlight)
 				}
 				h.lostPacketsInfo = append(h.lostPacketsInfo, congestionExt.LostPacketInfo{
@@ -982,6 +985,7 @@ func (h *sentPacketHandler) OnLossDetectionTimeout(now monotime.Time) error {
 	// actually packets outstanding.
 	if h.bytesInFlight == 0 && !h.peerCompletedAddressValidation {
 		h.ptoCount++
+		h.connStats.PTOCount.Add(1)
 		h.numProbesToSend++
 		if h.initialPackets != nil {
 			h.ptoMode = SendPTOInitial
@@ -1002,6 +1006,7 @@ func (h *sentPacketHandler) OnLossDetectionTimeout(now monotime.Time) error {
 		return nil
 	}
 	h.ptoCount++
+	h.connStats.PTOCount.Add(1)
 	if h.logger.Debug() {
 		h.logger.Debugf("Loss detection alarm for %s fired in PTO mode. PTO count: %d", encLevel, h.ptoCount)
 	}
