@@ -127,7 +127,9 @@ func TestLossRecoveryMaxAckDelay(t *testing.T) {
 			dropNext.Store(true)
 			elapsed[tc.maxAckDelay] = pair.roundTrip(t, 0xfe)
 			require.False(t, dropNext.Load())
+			// the lost request is the one the PTO probe retransmitted
 			require.NotZero(t, pair.client.ConnectionStats().PTOCount)
+			require.NotZero(t, pair.client.ConnectionStats().PacketsLost)
 		})
 	}
 	fast, slow := elapsed[2*time.Millisecond], elapsed[0]

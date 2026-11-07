@@ -5,7 +5,8 @@
 - [x] T003 Series 1: config fields, validation, `LossRecovery()`, recovery parameters (C1; FR-002, FR-003).
 - [x] T004 Series 2: copies (C2; FR-004).
 - [x] T005 Series 3: counters (C3; FR-005).
-- [ ] T006 Full suite with Core's toolchain, race on the touched packages; push the line (FR-001).
+- [x] T006 Full suite with Core's toolchain, race on the touched packages; push the line (FR-001).
+- [x] T007 Count PTO-retransmitted packets as lost (C3 amendment); full suite, race; push (FR-005).
 
 ## Evidence
 
@@ -44,3 +45,11 @@
     a custom controller, where upstream counted 0.
   - Full suite with go1.27.0: exit 0, 25 packages ok; `-race` on the root package, `internal/ackhandler`,
     `internal/congestion`, `internal/utils` and `integrationtests/self`.
+- 2026-11-07 T006: the line pushed to `cuber` at `afe4141e`; Core pins it (Core spec021 T006).
+- 2026-11-07 T007, found by Core spec021's netem test (5% random loss on a 7.5 ms path, 300 lone requests): 28 and 30
+  PTOs but 2 and 0 packets lost, because `QueueProbePacket` retires the lost packet of a lone request without
+  counting it. `TestSentPacketHandlerProbeRetransmissionCounted`: with Cubic and with a custom controller, the probe's
+  packet counts once in `PacketsLost` and `BytesLost` with no congestion event, its late acknowledgement counts in
+  `SpuriousLosses`, and an MTU probe is never retransmitted this way. `TestLossRecoveryMaxAckDelay` now also
+  requires the lost request in `PacketsLost`.  Full suite with go1.27.0: exit 0, 25 packages ok; `-race` on the root package, `internal/ackhandler`,
+  `internal/congestion`, `internal/utils` and `integrationtests/self`.

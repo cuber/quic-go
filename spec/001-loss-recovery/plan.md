@@ -58,7 +58,9 @@ Three commits on the line, in this order. Each keeps upstream's signatures where
 - **`internal/utils/connstats.go`, `connection.go`.** `SpuriousLosses`, `PTOCount` and `DuplicatesReceived` and
   their public copies in `ConnectionStats`.
 - **Loss.** The two `Add` calls move from `cubicSender.OnCongestionEvent` to `detectLostPackets`, at its call of
-  `cc.OnCongestionEvent` for a lost packet.
+  `cc.OnCongestionEvent` for a lost packet. A fourth commit (2026-11-07) also counts the packet `QueueProbePacket`
+  declares lost for a PTO probe, without a congestion event, and records a 1-RTT one in `lostPackets` so that a late
+  acknowledgement counts as spurious.
 - **`PTOCount`** at both `ptoCount++` sites of `OnLossDetectionTimeout`; **`SpuriousLosses`** in
   `detectSpuriousLosses`; **`DuplicatesReceived`** at the two `IsPotentiallyDuplicate` drops.
 

@@ -243,5 +243,52 @@ func TestSentPacketHandlerPTOCounter(t *testing.T) {
 		require.NoError(t, sph.OnLossDetectionTimeout(sph.GetLossDetectionTimeout()))
 	}
 	require.Equal(t, uint64(3), stats.PTOCount.Load())
-	require.Zero(t, stats.PacketsLost.Load(), "a PTO is a probe, not a loss")
+	require.Zero(t, stats.PacketsLost.Load(), "an expired PTO alone declares nothing lost")
+}
+
+// A packet whose frames a PTO probe retransmits counts as lost, without a congestion event; its late
+// acknowledgement makes it a spurious loss. Lone requests lose their packets this way.
+func TestSentPacketHandlerProbeRetransmissionCounted(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		var stats utils.ConnectionStats
+		rttStats := utils.NewRTTStats()
+		rttStats.UpdateRTT(10*time.Millisecond, 0)
+		sph := newRecoveryTestHandler(rttStats, &stats)
+		var cc countingCC
+		if custom {
+			sph.SetCongestionControl(&cc)
+		}
+		sph.DropPackets(protocol.EncryptionInitial, monotime.Now())
+		sph.DropPackets(protocol.EncryptionHandshake, monotime.Now())
+		var packets packetTracker
+		now := monotime.Now()
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.Encryption1RTT, protocol.ECNNon, 700, false, false)
+
+		require.NoError(t, sph.OnLossDetectionTimeout(sph.GetLossDetectionTimeout()))
+		require.True(t, sph.QueueProbePacket(protocol.Encryption1RTT))
+		require.Equal(t, []protocol.PacketNumber{pn}, packets.Lost)
+		require.Equal(t, uint64(1), stats.PacketsLost.Load(), "custom controller: %t", custom)
+		require.Equal(t, uint64(700), stats.BytesLost.Load())
+		require.Zero(t, cc.congestionEvents, "a PTO is no congestion signal")
+
+		// the probe went out, and the original's acknowledgement arrives after all
+		probe := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(30*time.Millisecond), probe, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(probe)}, protocol.Encryption1RTT, protocol.ECNNon, 700, false, false)
+		_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pn, probe)}, protocol.Encryption1RTT, now.Add(40*time.Millisecond))
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), stats.SpuriousLosses.Load())
+		require.Equal(t, uint64(1), stats.PacketsLost.Load())
+	}
+
+	// an MTU probe is never outstanding, so no PTO probe retransmits it and it stays uncounted, as in loss detection
+	var stats utils.ConnectionStats
+	sph := newRecoveryTestHandler(utils.NewRTTStats(), &stats)
+	sph.DropPackets(protocol.EncryptionInitial, monotime.Now())
+	sph.DropPackets(protocol.EncryptionHandshake, monotime.Now())
+	var packets packetTracker
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(monotime.Now(), pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.Encryption1RTT, protocol.ECNNon, 1400, true, false)
+	require.False(t, sph.QueueProbePacket(protocol.Encryption1RTT))
+	require.Zero(t, stats.PacketsLost.Load())
 }

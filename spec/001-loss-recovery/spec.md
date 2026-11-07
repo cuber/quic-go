@@ -3,7 +3,8 @@
 - Feature ID: 001-loss-recovery
 - Created: 2026-11-07
 - Status: Approved (2026-11-07; user: "补丁用 fork 的方式做；开始设计吧"; "quic-go 也要使用 spec-kit 不然后续 rebase 升级就无从下手了";
-  "开始吧；这个改好需要经过全量测试")
+  "开始吧；这个改好需要经过全量测试"). Amended the same day: PTO-retransmitted packets count as lost (C3), found by
+  Core spec021's netem test.
 - Line: `fork/2026-11-07/184d081eef3e` (base `184d081eef3e`, apernet `v0.61.0-mod-rename`)
 - Consumer: [Core spec021](../../../xray-core/spec/021-quic-loss-recovery/spec.md), which sets these fields from
   `finalmask.quicParams` and reports the counters through `HandlerService.GetQuicStats`. The problem, the measured
@@ -76,8 +77,8 @@ depending on the congestion controller.
 
 | Field | Counts |
 |---|---|
-| `PacketsLost`, `BytesLost` (existing) | Ack-eliciting packets that loss detection declares lost, other than path probes and path MTU probes, counted in `sentPacketHandler.detectLostPackets` whatever the congestion controller. Cubic users see the same packets as before. An ECN-CE congestion event no longer counts as a lost packet; it is not one. |
-| `SpuriousLosses` | Packets declared lost and acknowledged later (`detectSpuriousLosses`). |
+| `PacketsLost`, `BytesLost` (existing) | Ack-eliciting packets declared lost, other than path probes and path MTU probes, whatever the congestion controller: by loss detection (`detectLostPackets`, the packets Cubic counted before), and by a PTO probe that retransmits their frames (`QueueProbePacket`, which Cubic never counted). The second kind is how a lone request's lost packet ends, so without it a path that loses only such packets would read 0. It raises no congestion event, since a PTO is no congestion signal; a later acknowledgement counts it in `SpuriousLosses`. An ECN-CE congestion event no longer counts as a lost packet; it is not one. |
+| `SpuriousLosses` | Packets declared lost, by either way, and acknowledged later (`detectSpuriousLosses`). |
 | `PTOCount` | PTO expirations (`OnLossDetectionTimeout` in PTO mode). |
 | `CopiesSent`, `CopyBytesSent` | Copies handed to the send queue, and their bytes. |
 | `CopiesSkipped` | Copies not sent because the send queue or the delay queue was full. |

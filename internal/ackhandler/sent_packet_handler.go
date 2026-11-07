@@ -1166,6 +1166,14 @@ func (h *sentPacketHandler) QueueProbePacket(encLevel protocol.EncryptionLevel) 
 	// Keep track of acknowledged frames instead.
 	// Call DeclareLost before queueFramesForRetransmission, which clears the packet's frames.
 	pnSpace.history.DeclareLost(pn)
+	// The probe retransmits the packet's frames, so it counts as lost (spec/001-loss-recovery C3), but without a
+	// congestion event: a PTO is no congestion signal. An acknowledgement that arrives later makes it spurious.
+	// An outstanding packet is never a path or MTU probe.
+	h.connStats.PacketsLost.Add(1)
+	h.connStats.BytesLost.Add(uint64(p.Length))
+	if encLevel == protocol.Encryption0RTT || encLevel == protocol.Encryption1RTT {
+		h.lostPackets.Add(pn, p.SendTime)
+	}
 	h.removeFromBytesInFlight(p)
 	h.queueFramesForRetransmission(p)
 	return true
