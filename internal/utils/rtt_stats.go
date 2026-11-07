@@ -27,6 +27,9 @@ type RTTStats struct {
 	meanDeviation atomic.Int64 // nanoseconds
 
 	maxAckDelay atomic.Int64 // nanoseconds
+
+	// defaultRTT replaces DefaultInitialRTT when set (spec/001-loss-recovery C1 InitialRTT).
+	defaultRTT time.Duration
 }
 
 func NewRTTStats() *RTTStats {
@@ -35,6 +38,25 @@ func NewRTTStats() *RTTStats {
 	rttStats.latestRTT.Store(DefaultInitialRTT.Nanoseconds())
 	rttStats.smoothedRTT.Store(DefaultInitialRTT.Nanoseconds())
 	return &rttStats
+}
+
+// SetDefaultRTT sets the RTT used before the first sample, in place of DefaultInitialRTT.
+// It must be called before any RTT sample is taken.
+func (r *RTTStats) SetDefaultRTT(d time.Duration) {
+	r.defaultRTT = d
+	if r.hasMeasurement {
+		return
+	}
+	r.minRTT.Store(d.Nanoseconds())
+	r.latestRTT.Store(d.Nanoseconds())
+	r.smoothedRTT.Store(d.Nanoseconds())
+}
+
+func (r *RTTStats) initialRTT() time.Duration {
+	if r.defaultRTT != 0 {
+		return r.defaultRTT
+	}
+	return DefaultInitialRTT
 }
 
 // MinRTT Returns the minRTT for the entire connection.
@@ -68,7 +90,7 @@ func (r *RTTStats) MaxAckDelay() time.Duration {
 // PTO gets the probe timeout duration.
 func (r *RTTStats) PTO(includeMaxAckDelay bool) time.Duration {
 	if !r.hasMeasurement {
-		return 2 * DefaultInitialRTT
+		return 2 * r.initialRTT()
 	}
 	pto := r.SmoothedRTT() + max(4*r.MeanDeviation(), protocol.TimerGranularity)
 	if includeMaxAckDelay {
@@ -140,9 +162,9 @@ func (r *RTTStats) SetInitialRTT(t time.Duration) {
 
 func (r *RTTStats) ResetForPathMigration() {
 	r.hasMeasurement = false
-	r.minRTT.Store(DefaultInitialRTT.Nanoseconds())
-	r.latestRTT.Store(DefaultInitialRTT.Nanoseconds())
-	r.smoothedRTT.Store(DefaultInitialRTT.Nanoseconds())
+	r.minRTT.Store(r.initialRTT().Nanoseconds())
+	r.latestRTT.Store(r.initialRTT().Nanoseconds())
+	r.smoothedRTT.Store(r.initialRTT().Nanoseconds())
 	r.meanDeviation.Store(0)
 	// max_ack_delay remains valid
 }
@@ -155,5 +177,6 @@ func (r *RTTStats) Clone() *RTTStats {
 	out.smoothedRTT.Store(r.smoothedRTT.Load())
 	out.meanDeviation.Store(r.meanDeviation.Load())
 	out.maxAckDelay.Store(r.maxAckDelay.Load())
+	out.defaultRTT = r.defaultRTT
 	return out
 }

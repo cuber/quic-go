@@ -205,6 +205,35 @@ type Config struct {
 	// Client side only; it has no effect on a listener. Because it pins the
 	// values above, settings that conflict with Chrome's are ignored.
 	ChromeParrot bool
+
+	// The fields below tune loss recovery and send redundant copies (spec/001-loss-recovery).
+	// A zero value keeps quic-go's behavior. LossRecovery returns the values a connection uses.
+
+	// MaxAckDelay is the local delayed-ACK timer. The max_ack_delay transport parameter
+	// advertises it plus the timer granularity (1 ms). Zero means 25 ms; at most 16382 ms.
+	MaxAckDelay time.Duration
+	// AckElicitingThreshold is the number of ack-eliciting packets received before an ACK
+	// is sent at once instead of on the timer. Zero means 2; at most 64.
+	AckElicitingThreshold int
+	// InitialRTT is the RTT before the first sample. Zero means 100 ms; at most 10 s.
+	InitialRTT time.Duration
+	// PTOBackoffLimit limits how many times in a row the PTO doubles. Zero means no limit; at most 16.
+	PTOBackoffLimit int
+	// LossTimeThreshold is the time threshold of RFC 9002 loss detection, in RTTs.
+	// Zero means 9/8; otherwise 1.0 to 4.0.
+	LossTimeThreshold float64
+	// LossPacketThreshold is the packet reordering threshold of RFC 9002 loss detection.
+	// Zero means 3; at most 64.
+	LossPacketThreshold int
+	// DuplicateMaxSize sends every 1-RTT datagram of at most this many bytes twice.
+	// Zero disables it. Copies are invisible to loss recovery and congestion control.
+	DuplicateMaxSize uint16
+	// DuplicateTail sends the last ack-eliciting datagram of a send round twice,
+	// when the round ends because nothing is left to send.
+	DuplicateTail bool
+	// DuplicateDelay sends a copy this long after its original, at most 1 s.
+	// It requires DuplicateMaxSize or DuplicateTail.
+	DuplicateDelay time.Duration
 }
 
 // ClientInfo contains information about an incoming connection attempt.

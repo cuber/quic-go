@@ -2,6 +2,7 @@ package ackhandler
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/apernet/quic-go/internal/monotime"
 	"github.com/apernet/quic-go/internal/protocol"
@@ -24,6 +25,13 @@ func NewReceivedPacketHandler(logger utils.Logger) *ReceivedPacketHandler {
 		appDataPackets:   *newAppDataReceivedPacketTracker(logger),
 		lowest1RTTPacket: protocol.InvalidPacketNumber,
 	}
+}
+
+// SetAckPolicy sets the delayed-ACK timer and the number of ack-eliciting packets
+// that trigger an immediate ACK for 1-RTT packets (spec/001-loss-recovery C1).
+func (h *ReceivedPacketHandler) SetAckPolicy(maxAckDelay time.Duration, ackElicitingThreshold int) {
+	h.appDataPackets.maxAckDelay = maxAckDelay
+	h.appDataPackets.ackElicitingThreshold = ackElicitingThreshold
 }
 
 func (h *ReceivedPacketHandler) ReceivedPacket(

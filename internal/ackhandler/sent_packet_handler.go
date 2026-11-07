@@ -31,6 +31,17 @@ const (
 	maxPTODuration = 60 * time.Second
 )
 
+// Recovery holds the loss recovery parameters of a connection (spec/001-loss-recovery C1).
+// A zero field keeps quic-go's value.
+type Recovery struct {
+	// PTOBackoffLimit limits how many times in a row the PTO doubles; 0: no limit.
+	PTOBackoffLimit int
+	// LossTimeThreshold replaces timeThreshold.
+	LossTimeThreshold float64
+	// LossPacketThreshold replaces packetThreshold.
+	LossPacketThreshold int
+}
+
 // Path probe packets are declared lost after this time.
 const pathProbePacketLossTimeout = time.Second
 
@@ -111,6 +122,12 @@ type sentPacketHandler struct {
 	// Only applies to the application-data packet number space.
 	numProbesToSend int
 
+	// ptoBackoffLimit caps the PTO's exponent; 0: no cap.
+	ptoBackoffLimit uint32
+	// timeThreshold and packetThreshold drive loss detection; see Recovery.
+	timeThreshold   float64
+	packetThreshold protocol.PacketNumber
+
 	// The alarm timeout
 	alarm alarmTimer
 
@@ -149,6 +166,7 @@ func NewSentPacketHandler(
 	shortPacketNumbers bool,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
+	recovery ...Recovery, // at most one; none keeps quic-go's values
 ) SentPacketHandler {
 	congestion := congestion.NewCubicSender(
 		congestion.DefaultClock{},
@@ -175,6 +193,18 @@ func NewSentPacketHandler(
 		perspective:                    pers,
 		qlogger:                        qlogger,
 		logger:                         logger,
+		timeThreshold:                  timeThreshold,
+		packetThreshold:                packetThreshold,
+	}
+	if len(recovery) > 0 {
+		r := recovery[0]
+		h.ptoBackoffLimit = uint32(r.PTOBackoffLimit)
+		if r.LossTimeThreshold != 0 {
+			h.timeThreshold = r.LossTimeThreshold
+		}
+		if r.LossPacketThreshold != 0 {
+			h.packetThreshold = protocol.PacketNumber(r.LossPacketThreshold)
+		}
 	}
 	if enableECN {
 		h.enableECN = true
@@ -675,7 +705,11 @@ func (h *sentPacketHandler) getLossTimeAndSpace() (monotime.Time, protocol.Encry
 }
 
 func (h *sentPacketHandler) getScaledPTO(includeMaxAckDelay bool) time.Duration {
-	pto := h.rttStats.PTO(includeMaxAckDelay) << h.ptoCount
+	shift := h.ptoCount
+	if h.ptoBackoffLimit != 0 {
+		shift = min(shift, h.ptoBackoffLimit)
+	}
+	pto := h.rttStats.PTO(includeMaxAckDelay) << shift
 	if pto > maxPTODuration || pto <= 0 {
 		return maxPTODuration
 	}
@@ -830,7 +864,7 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 	pnSpace.lossTime = 0
 
 	maxRTT := float64(max(h.rttStats.LatestRTT(), h.rttStats.SmoothedRTT()))
-	lossDelay := time.Duration(timeThreshold * maxRTT)
+	lossDelay := time.Duration(h.timeThreshold * maxRTT)
 
 	// Minimum time of granularity before packets are deemed lost.
 	lossDelay = max(lossDelay, protocol.TimerGranularity)
@@ -863,7 +897,7 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 					})
 				}
 			}
-		} else if pnSpace.history.Difference(pnSpace.largestAcked, pn) >= packetThreshold {
+		} else if pnSpace.history.Difference(pnSpace.largestAcked, pn) >= h.packetThreshold {
 			packetLost = true
 			if !p.isPathProbePacket && p.IsAckEliciting() {
 				if h.logger.Debug() {

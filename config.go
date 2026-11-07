@@ -45,6 +45,9 @@ func validateConfig(config *Config) error {
 	if config.InitialPacketSize > protocol.MaxPacketBufferSize {
 		config.InitialPacketSize = protocol.MaxPacketBufferSize
 	}
+	if err := validateLossRecovery(config); err != nil {
+		return err
+	}
 	// check that all QUIC versions are actually supported
 	for _, v := range config.Versions {
 		if !protocol.IsValidVersion(v) {
@@ -149,5 +152,14 @@ func populateConfig(config *Config) *Config {
 		MaxDatagramFrameSize:             config.MaxDatagramFrameSize,
 		DisablePathManager:               config.DisablePathManager,
 		ChromeParrot:                     config.ChromeParrot,
+		MaxAckDelay:                      config.MaxAckDelay,
+		AckElicitingThreshold:            config.AckElicitingThreshold,
+		InitialRTT:                       config.InitialRTT,
+		PTOBackoffLimit:                  config.PTOBackoffLimit,
+		LossTimeThreshold:                config.LossTimeThreshold,
+		LossPacketThreshold:              config.LossPacketThreshold,
+		DuplicateMaxSize:                 config.DuplicateMaxSize,
+		DuplicateTail:                    config.DuplicateTail,
+		DuplicateDelay:                   config.DuplicateDelay,
 	}
 }

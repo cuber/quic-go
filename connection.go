@@ -135,6 +135,7 @@ type Conn struct {
 	perspective protocol.Perspective
 	version     protocol.Version
 	config      *Config
+	recovery    LossRecovery // config.LossRecovery(), resolved once in preSetup
 
 	conn      sendConn
 	sendQueue sender
@@ -322,6 +323,7 @@ var newConnection = func(
 		false, // servers keep quic-go's 2-byte packet number floor
 		s.qlogger,
 		s.logger,
+		s.recovery.ackhandlerRecovery(),
 	)
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
@@ -333,7 +335,7 @@ var newConnection = func(
 		MaxIdleTimeout:                  s.config.MaxIdleTimeout,
 		MaxBidiStreamNum:                protocol.StreamNum(s.config.MaxIncomingStreams),
 		MaxUniStreamNum:                 protocol.StreamNum(s.config.MaxIncomingUniStreams),
-		MaxAckDelay:                     protocol.MaxAckDelayInclGranularity,
+		MaxAckDelay:                     s.recovery.MaxAckDelay + protocol.TimerGranularity,
 		AckDelayExponent:                protocol.AckDelayExponent,
 		MaxUDPPayloadSize:               protocol.MaxPacketBufferSize,
 		StatelessResetToken:             &statelessResetToken,
@@ -455,6 +457,7 @@ var newClientConnection = func(
 		s.config.ChromeParrot,
 		s.qlogger,
 		s.logger,
+		s.recovery.ackhandlerRecovery(),
 	)
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	oneRTTStream := newCryptoStream()
@@ -466,7 +469,7 @@ var newClientConnection = func(
 		MaxIdleTimeout:                 s.config.MaxIdleTimeout,
 		MaxBidiStreamNum:               protocol.StreamNum(s.config.MaxIncomingStreams),
 		MaxUniStreamNum:                protocol.StreamNum(s.config.MaxIncomingUniStreams),
-		MaxAckDelay:                    protocol.MaxAckDelayInclGranularity,
+		MaxAckDelay:                    s.recovery.MaxAckDelay + protocol.TimerGranularity,
 		MaxUDPPayloadSize:              protocol.MaxPacketBufferSize,
 		AckDelayExponent:               protocol.AckDelayExponent,
 		// For interoperability with quic-go versions before May 2023, this value must be set to a value
@@ -525,6 +528,7 @@ var newClientConnection = func(
 }
 
 func (c *Conn) preSetup() {
+	c.recovery = c.config.LossRecovery()
 	c.largestRcvdAppData = protocol.InvalidPacketNumber
 	c.initialStream = newInitialCryptoStream(c.perspective == protocol.PerspectiveClient, c.config.ChromeParrot)
 	c.handshakeStream = newCryptoStream()
@@ -536,6 +540,7 @@ func (c *Conn) preSetup() {
 		false, // ACK_FREQUENCY is not supported yet
 	)
 	c.rttStats = utils.NewRTTStats()
+	c.rttStats.SetDefaultRTT(c.recovery.InitialRTT)
 	c.connFlowController = newConnectionFlowController(
 		protocol.ByteCount(c.config.InitialConnectionReceiveWindow),
 		protocol.ByteCount(c.config.MaxConnectionReceiveWindow),
@@ -570,6 +575,7 @@ func (c *Conn) preSetup() {
 	c.creationTime = now
 
 	c.receivedPacketHandler = *ackhandler.NewReceivedPacketHandler(c.logger)
+	c.receivedPacketHandler.SetAckPolicy(c.recovery.MaxAckDelay, c.recovery.AckElicitingThreshold)
 
 	c.datagramQueue = newDatagramQueue(c.scheduleSending, c.logger)
 	c.connState.Version = c.version

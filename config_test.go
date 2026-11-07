@@ -141,6 +141,24 @@ func configWithNonZeroNonFunctionFields(t *testing.T, chromeParrot bool) *Config
 			f.Set(reflect.ValueOf(true))
 		case "ChromeParrot":
 			f.Set(reflect.ValueOf(chromeParrot))
+		case "MaxAckDelay":
+			f.Set(reflect.ValueOf(2 * time.Millisecond))
+		case "AckElicitingThreshold":
+			f.Set(reflect.ValueOf(1))
+		case "InitialRTT":
+			f.Set(reflect.ValueOf(20 * time.Millisecond))
+		case "PTOBackoffLimit":
+			f.Set(reflect.ValueOf(2))
+		case "LossTimeThreshold":
+			f.Set(reflect.ValueOf(1.5))
+		case "LossPacketThreshold":
+			f.Set(reflect.ValueOf(5))
+		case "DuplicateMaxSize":
+			f.Set(reflect.ValueOf(uint16(200)))
+		case "DuplicateTail":
+			f.Set(reflect.ValueOf(true))
+		case "DuplicateDelay":
+			f.Set(reflect.ValueOf(3 * time.Millisecond))
 		default:
 			t.Fatalf("all fields must be accounted for, but saw unknown field %q", fn)
 		}

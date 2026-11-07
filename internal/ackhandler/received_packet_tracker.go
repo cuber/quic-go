@@ -91,6 +91,9 @@ type appDataReceivedPacketTracker struct {
 	maxAckDelay time.Duration
 	ackQueued   bool // true if we need send a new ACK
 
+	// ackElicitingThreshold replaces packetsBeforeAck (spec/001-loss-recovery C1).
+	ackElicitingThreshold int
+
 	ackElicitingPacketsReceivedSinceLastAck int
 	ackAlarm                                monotime.Time
 
@@ -101,6 +104,7 @@ func newAppDataReceivedPacketTracker(logger utils.Logger) *appDataReceivedPacket
 	h := &appDataReceivedPacketTracker{
 		receivedPacketTracker: *newReceivedPacketTracker(),
 		maxAckDelay:           protocol.MaxAckDelay,
+		ackElicitingThreshold: packetsBeforeAck,
 		logger:                logger,
 	}
 	return h
@@ -184,9 +188,9 @@ func (h *appDataReceivedPacketTracker) shouldQueueACK(pn protocol.PacketNumber, 
 	}
 
 	// send an ACK every 2 ack-eliciting packets
-	if h.ackElicitingPacketsReceivedSinceLastAck >= packetsBeforeAck {
+	if h.ackElicitingPacketsReceivedSinceLastAck >= h.ackElicitingThreshold {
 		if h.logger.Debug() {
-			h.logger.Debugf("\tQueueing ACK because packet %d packets were received after the last ACK (using initial threshold: %d).", h.ackElicitingPacketsReceivedSinceLastAck, packetsBeforeAck)
+			h.logger.Debugf("\tQueueing ACK because packet %d packets were received after the last ACK (using initial threshold: %d).", h.ackElicitingPacketsReceivedSinceLastAck, h.ackElicitingThreshold)
 		}
 		return true
 	}
