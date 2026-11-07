@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -130,4 +131,154 @@ func TestLossRecoveryMaxAckDelay(t *testing.T) {
 	t.Logf("a lost request took %s with a 2 ms max_ack_delay, %s by default", fast, slow)
 	require.LessOrEqual(t, fast, lossRecoveryRTT+2*time.Millisecond+15*time.Millisecond)
 	require.GreaterOrEqual(t, slow-fast, 20*time.Millisecond)
+}
+
+// wireLog counts the short-header datagrams the client sends, by content.
+type wireLog struct {
+	mu   sync.Mutex
+	seen map[string]int
+	// sizes of the datagrams seen once and twice
+	once, twice []int
+}
+
+func (w *wireLog) record(p simnet.Packet) (seenBefore int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.seen == nil {
+		w.seen = make(map[string]int)
+	}
+	k := string(p.Data)
+	seenBefore = w.seen[k]
+	w.seen[k]++
+	return seenBefore
+}
+
+func (w *wireLog) counts() (single, double, more int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, n := range w.seen {
+		switch {
+		case n == 1:
+			single++
+		case n == 2:
+			double++
+		default:
+			more++
+		}
+	}
+	return
+}
+
+func (w *wireLog) reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.seen = nil
+}
+
+func TestLossRecoveryNoCopiesByDefault(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var log wireLog
+		pair := newEchoPair(t, nil, nil, func(toServer bool, p simnet.Packet) bool {
+			if toServer {
+				log.record(p)
+			}
+			return false
+		})
+		pair.warmUp(t)
+		_, double, more := log.counts()
+		require.Zero(t, double+more)
+		require.Zero(t, pair.client.ConnectionStats().CopiesSent)
+	})
+}
+
+func TestLossRecoveryCopiesBySize(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var log wireLog
+		var dropOriginals atomic.Bool
+		// MTU probes are never copied; without them every packet the client sends has a copy
+		pair := newEchoPair(t, &quic.Config{DuplicateMaxSize: 1500, DisablePathMTUDiscovery: true}, nil, func(toServer bool, p simnet.Packet) bool {
+			if !toServer {
+				return false
+			}
+			return log.record(p) == 0 && dropOriginals.Load()
+		})
+		pair.warmUp(t) // the handshake is confirmed by now
+		log.reset()
+		before := pair.client.ConnectionStats()
+		for i := range 5 {
+			pair.roundTrip(t, byte(i))
+		}
+		synctest.Wait() // let the last ACKs go out
+		// every datagram the client sends goes out twice, byte for byte
+		single, double, more := log.counts()
+		require.Zero(t, single)
+		require.NotZero(t, double)
+		require.Zero(t, more)
+		after := pair.client.ConnectionStats()
+		require.Equal(t, uint64(double), after.CopiesSent-before.CopiesSent)
+		require.Equal(t, after.PacketsSent-before.PacketsSent, after.CopiesSent-before.CopiesSent, "copies are not counted as sent packets")
+		require.NotZero(t, after.CopyBytesSent)
+		require.Zero(t, pair.server.ConnectionStats().CopiesSent)
+
+		// losing every original costs nothing: the copies carry the requests
+		dropOriginals.Store(true)
+		for i := range 5 {
+			require.Less(t, pair.roundTrip(t, byte(i)), lossRecoveryRTT+2*time.Millisecond)
+		}
+	})
+}
+
+func TestLossRecoveryCopyDelay(t *testing.T) {
+	elapsed := make(map[time.Duration]time.Duration)
+	for _, delay := range []time.Duration{0, 4 * time.Millisecond} {
+		synctest.Test(t, func(t *testing.T) {
+			var dropUntil atomic.Int64
+			pair := newEchoPair(t, &quic.Config{DuplicateMaxSize: 1500, DuplicateDelay: delay}, nil, func(toServer bool, _ simnet.Packet) bool {
+				return toServer && time.Now().UnixNano() < dropUntil.Load()
+			})
+			pair.warmUp(t)
+			// a 2 ms burst of loss takes an original and a copy right behind it, not a copy 4 ms later
+			dropUntil.Store(time.Now().Add(2 * time.Millisecond).UnixNano())
+			elapsed[delay] = pair.roundTrip(t, 0xfe)
+		})
+	}
+	t.Logf("a request in a 2 ms loss burst took %s with copies right behind, %s with copies 4 ms later", elapsed[0], elapsed[4*time.Millisecond])
+	require.LessOrEqual(t, elapsed[4*time.Millisecond], lossRecoveryRTT+4*time.Millisecond+time.Millisecond)
+	require.Greater(t, elapsed[0], lossRecoveryRTT+10*time.Millisecond)
+}
+
+func TestLossRecoveryTailCopies(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var log wireLog
+		var dropOriginals atomic.Bool
+		pair := newEchoPair(t, &quic.Config{DuplicateTail: true}, nil, func(toServer bool, p simnet.Packet) bool {
+			if !toServer {
+				return false
+			}
+			return log.record(p) == 0 && dropOriginals.Load()
+		})
+		pair.warmUp(t)
+
+		// a bulk write sends many datagrams, but only the last of each round is copied
+		log.reset()
+		before := pair.client.ConnectionStats()
+		data := make([]byte, 200<<10)
+		_, err := pair.str.Write(data)
+		require.NoError(t, err)
+		_, err = io.ReadFull(pair.str, data)
+		require.NoError(t, err)
+		synctest.Wait()
+		after := pair.client.ConnectionStats()
+		packets := after.PacketsSent - before.PacketsSent
+		copies := after.CopiesSent - before.CopiesSent
+		t.Logf("%d copies for %d packets", copies, packets)
+		require.NotZero(t, copies)
+		require.Less(t, copies*5, packets)
+		_, _, more := log.counts()
+		require.Zero(t, more)
+
+		// a lone request is its round's tail
+		dropOriginals.Store(true)
+		require.Less(t, pair.roundTrip(t, 1), lossRecoveryRTT+2*time.Millisecond)
+	})
 }

@@ -136,6 +136,10 @@ type Conn struct {
 	version     protocol.Version
 	config      *Config
 	recovery    LossRecovery // config.LossRecovery(), resolved once in preSetup
+	dup         *duplicator  // nil unless the config sends copies
+	// lastPacketAckEliciting says if the last packet appendOneShortHeaderPacket packed was
+	// ack-eliciting; it is only kept for the duplicator.
+	lastPacketAckEliciting bool
 
 	conn      sendConn
 	sendQueue sender
@@ -529,6 +533,7 @@ var newClientConnection = func(
 
 func (c *Conn) preSetup() {
 	c.recovery = c.config.LossRecovery()
+	c.dup = newDuplicator(c.recovery, &c.connStats)
 	c.largestRcvdAppData = protocol.InvalidPacketNumber
 	c.initialStream = newInitialCryptoStream(c.perspective == protocol.PerspectiveClient, c.config.ChromeParrot)
 	c.handshakeStream = newCryptoStream()
@@ -733,6 +738,10 @@ runLoop:
 			}
 		}
 
+		if c.dup != nil {
+			c.dup.sendDue(c.sendQueue, now)
+		}
+
 		if c.sendQueue.WouldBlock() {
 			// The send queue is still busy sending out packets. Wait until there's space to enqueue new packets.
 			sendQueueAvailable = c.sendQueue.Available()
@@ -765,6 +774,9 @@ runLoop:
 	closeErr := c.closeErr.Load()
 	c.cryptoStreamHandler.Close()
 	c.sendQueue.Close() // close the send queue before sending the CONNECTION_CLOSE
+	if c.dup != nil {
+		c.dup.close()
+	}
 	c.handleCloseError(closeErr)
 	if c.qlogger != nil {
 		if e := (&errCloseForRecreating{}); !errors.As(closeErr.err, &e) {
@@ -856,6 +868,15 @@ type ConnectionStats struct {
 	// (does not monotonically increase, because packets that are declared lost
 	// can subsequently be received).
 	PacketsLost uint64
+
+	// CopiesSent is the number of redundant copies sent (Config.DuplicateMaxSize and
+	// DuplicateTail). Copies are not included in BytesSent and PacketsSent.
+	CopiesSent uint64
+	// CopyBytesSent is the number of bytes of the copies sent.
+	CopyBytesSent uint64
+	// CopiesSkipped is the number of copies not sent because the send queue was full,
+	// or because the copies waiting for DuplicateDelay already took their budget.
+	CopiesSkipped uint64
 }
 
 func (c *Conn) ConnectionStats() ConnectionStats {
@@ -871,6 +892,10 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 		PacketsReceived: c.connStats.PacketsReceived.Load(),
 		BytesLost:       c.connStats.BytesLost.Load(),
 		PacketsLost:     c.connStats.PacketsLost.Load(),
+
+		CopiesSent:    c.connStats.CopiesSent.Load(),
+		CopyBytesSent: c.connStats.CopyBytesSent.Load(),
+		CopiesSkipped: c.connStats.CopiesSkipped.Load(),
 	}
 }
 
@@ -922,6 +947,11 @@ func (c *Conn) maybeResetTimer() {
 	}
 	if t := c.sentPacketHandler.GetLossDetectionTimeout(); !t.IsZero() && t.Before(deadline) {
 		deadline = t
+	}
+	if c.dup != nil {
+		if t := c.dup.deadline(); !t.IsZero() && t.Before(deadline) {
+			deadline = t
+		}
 	}
 	if c.blocked == blockModeCongestionLimited {
 		c.timer.Reset(monotime.Until(deadline))
@@ -2600,18 +2630,31 @@ func (c *Conn) sendPackets(now monotime.Time) error {
 }
 
 func (c *Conn) sendPacketsWithoutGSO(now monotime.Time) error {
+	var nothingLeft bool
+	if c.dup != nil {
+		defer func() { c.dup.endRound(c.sendQueue, nothingLeft, now) }()
+	}
 	for {
 		buf := getPacketBuffer()
 		ecn := c.sentPacketHandler.ECNMode(true)
 		if _, err := c.appendOneShortHeaderPacket(buf, c.maxPacketSize(), ecn, now); err != nil {
 			if err == errNothingToPack {
 				buf.Release()
+				nothingLeft = true
 				return nil
 			}
 			return err
 		}
 
+		var cp *packetBuffer
+		if c.dup != nil {
+			cp = c.dup.cloneIfSmall(buf.Data)
+			c.dup.noteTail(buf.Data, c.lastPacketAckEliciting, cp != nil, ecn)
+		}
 		c.sendQueue.Send(buf, 0, ecn)
+		if cp != nil {
+			c.dup.send(c.sendQueue, cp, 0, ecn, now)
+		}
 
 		if c.sendQueue.WouldBlock() {
 			return nil
@@ -2640,8 +2683,10 @@ func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 	maxSize := c.maxPacketSize()
 
 	ecn := c.sentPacketHandler.ECNMode(true)
+	var tail gsoTail // the last ack-eliciting segment of the batch, for the duplicator
 	for {
-		var dontSendMore bool
+		var dontSendMore, nothingLeft bool
+		start := buf.Len()
 		size, err := c.appendOneShortHeaderPacket(buf, maxSize, ecn, now)
 		if err != nil {
 			if err != errNothingToPack {
@@ -2652,6 +2697,9 @@ func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 				return nil
 			}
 			dontSendMore = true
+			nothingLeft = true
+		} else if c.dup != nil && c.lastPacketAckEliciting {
+			tail = gsoTail{start: start, end: buf.Len(), ok: true}
 		}
 
 		if !dontSendMore {
@@ -2676,7 +2724,12 @@ func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 			continue
 		}
 
-		c.sendQueue.Send(buf, uint16(maxSize), ecn)
+		if c.dup != nil {
+			c.sendBatchWithCopies(buf, maxSize, ecn, tail, nothingLeft, now)
+		} else {
+			c.sendQueue.Send(buf, uint16(maxSize), ecn)
+		}
+		tail = gsoTail{}
 
 		if dontSendMore {
 			return nil
@@ -2730,7 +2783,14 @@ func (c *Conn) maybeSendAckOnlyPacket(now monotime.Time) error {
 	}
 	c.logShortHeaderPacket(p, ecn, buf.Len())
 	c.registerPackedShortHeaderPacket(p, ecn, now)
+	var cp *packetBuffer
+	if c.dup != nil {
+		cp = c.dup.cloneIfSmall(buf.Data)
+	}
 	c.sendQueue.Send(buf, 0, ecn)
+	if cp != nil {
+		c.dup.send(c.sendQueue, cp, 0, ecn, now)
+	}
 	return nil
 }
 
@@ -2784,6 +2844,9 @@ func (c *Conn) appendOneShortHeaderPacket(buf *packetBuffer, maxSize protocol.By
 	size := buf.Len() - startLen
 	c.logShortHeaderPacket(p, ecn, size)
 	c.registerPackedShortHeaderPacket(p, ecn, now)
+	if c.dup != nil {
+		c.lastPacketAckEliciting = len(p.StreamFrames) > 0 || ackhandler.HasAckElicitingFrames(p.Frames)
+	}
 	return size, nil
 }
 
@@ -2879,7 +2942,16 @@ func (c *Conn) sendPackedCoalescedPacket(packet *coalescedPacket, ecn protocol.E
 		)
 	}
 	c.connIDManager.SentPacket()
+	var cp *packetBuffer
+	// Long-header datagrams are never copied, and nothing is before the handshake is confirmed:
+	// copies bypass the amplification limit.
+	if c.dup != nil && c.handshakeConfirmed && packet.IsOnlyShortHeaderPacket() {
+		cp = c.dup.cloneIfSmall(packet.buffer.Data)
+	}
 	c.sendQueue.Send(packet.buffer, 0, ecn)
+	if cp != nil {
+		c.dup.send(c.sendQueue, cp, 0, ecn, now)
+	}
 	return nil
 }
 

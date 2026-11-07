@@ -3,7 +3,7 @@
 - [x] T001 Spec-kit: `spec/README.md`, this spec, plan and tasks; Core spec021's library contract moved here.
 - [x] T002 Upstream suite on the unmodified line with Core's toolchain.
 - [x] T003 Series 1: config fields, validation, `LossRecovery()`, recovery parameters (C1; FR-002, FR-003).
-- [ ] T004 Series 2: copies (C2; FR-004).
+- [x] T004 Series 2: copies (C2; FR-004).
 - [ ] T005 Series 3: counters (C3; FR-005).
 - [ ] T006 Full suite with Core's toolchain, race on the touched packages; push the line (FR-001).
 
@@ -19,3 +19,17 @@
     `max_ack_delay` as 26 ms by default and 3 ms with 2 ms. A request whose datagram is lost takes 47 ms by default and
     24 ms with 2 ms on both ends.
   - Full suite with go1.27.0: exit 0, 25 packages ok; `-race` on `internal/ackhandler` and `internal/utils`.
+- 2026-11-07 T004:
+  - Unit (`duplicator_test.go`, a recording send queue): selection by size, a full queue skipped and counted, the
+    delay and its order, the 256 KiB delay budget, the tail (last ack-eliciting, only when the round ran out of data,
+    never twice), close, and GSO batches (whole batch, last segment, tail).
+  - Integration on the simulated link (`integrationtests/self/loss_recovery_test.go`):
+    - default: no client datagram appears twice on the wire;
+    - `DuplicateMaxSize` 1500: after confirmation every client datagram appears exactly twice, copies equal sent
+      packets with MTU discovery off (simnet's 1400-byte MTU drops MTU probes, which are never copied), the server
+      copies nothing, and dropping every original costs no round-trip time;
+    - `DuplicateDelay`: a request in a 2 ms loss burst takes 14 ms with copies 4 ms behind, 79 ms with copies right
+      behind (both lost, PTO);
+    - `DuplicateTail`: 1 copy for 160 packets of a 200 KiB write, and a lone request whose original is lost
+      completes within one round trip.
+  - Full suite with go1.27.0: exit 0, 25 packages ok; `-race` on the root package.

@@ -36,11 +36,15 @@ Three commits on the line, in this order. Each keeps upstream's signatures where
   - the tail candidate: with `DuplicateTail`, the non-GSO loop keeps a private copy of the last ack-eliciting datagram
     of the round, marked when the size rule already copied it.
 - **`connection.go` hooks.**
-  - `appendOneShortHeaderPacket` returns whether the packet was ack-eliciting (stream frames or ack-eliciting
-    frames), through a variant `appendOneShortHeaderPacketInfo`, so the upstream function keeps its signature.
-  - `sendPacketsWithoutGSO`, `sendPacketsWithGSO`, `maybeSendAckOnlyPacket` and `sendPackedCoalescedPacket` (only
-    for a datagram that holds just a short-header packet, which covers 1-RTT PTO probes) hand qualifying datagrams
-    over before `sendQueue.Send`.
+  - `appendOneShortHeaderPacket` records whether the packet was ack-eliciting (stream frames or ack-eliciting
+    frames) in `Conn.lastPacketAckEliciting`, only when the connection has a duplicator, so the upstream function
+    keeps its signature.
+  - `sendPacketsWithoutGSO`, `sendPacketsWithGSO`, `maybeSendAckOnlyPacket` and `sendPackedCoalescedPacket` hand
+    qualifying datagrams over before `sendQueue.Send`. The first three run only after the handshake is confirmed;
+    the coalesced path copies only then, and only a datagram that holds just a short-header packet (1-RTT PTO
+    probes), because copies must not count against a server's amplification limit.
+  - The GSO batch goes through `sendBatchWithCopies` (in `duplicator.go`) when the connection has a duplicator.
+  - The copy counters (`CopiesSent`, `CopyBytesSent`, `CopiesSkipped`) come with this series.
   - The tail: the non-GSO loop sends its candidate when `appendOneShortHeaderPacket` returns `errNothingToPack`, and
     drops it on any other exit; the GSO loop copies the final batch's last ack-eliciting segment when the batch ends
     on `errNothingToPack`.
@@ -51,8 +55,8 @@ Three commits on the line, in this order. Each keeps upstream's signatures where
 
 ### 3. Counters (C3)
 
-- **`internal/utils/connstats.go`, `connection.go`.** The new atomic fields and their public copies in
-  `ConnectionStats`.
+- **`internal/utils/connstats.go`, `connection.go`.** `SpuriousLosses`, `PTOCount` and `DuplicatesReceived` and
+  their public copies in `ConnectionStats`.
 - **Loss.** The two `Add` calls move from `cubicSender.OnCongestionEvent` to `detectLostPackets`, at its call of
   `cc.OnCongestionEvent` for a lost packet.
 - **`PTOCount`** at both `ptoCount++` sites of `OnLossDetectionTimeout`; **`SpuriousLosses`** in

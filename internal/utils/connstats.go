@@ -11,4 +11,9 @@ type ConnectionStats struct {
 	PacketsReceived atomic.Uint64
 	BytesLost       atomic.Uint64
 	PacketsLost     atomic.Uint64
+
+	// spec/001-loss-recovery C3
+	CopiesSent    atomic.Uint64
+	CopyBytesSent atomic.Uint64
+	CopiesSkipped atomic.Uint64
 }

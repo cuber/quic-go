@@ -62,7 +62,9 @@ depending on the congestion controller.
 - **Outside recovery.** Copies are never registered with the sent packet handler: they add nothing to bytes in
   flight, the congestion controller and the pacer never see them, and `BytesSent` and `PacketsSent` count originals
   only.
-- **Never copied.** Long-header and coalesced datagrams, path probes and path MTU probes.
+- **Never copied.** Long-header and coalesced datagrams, path probes and path MTU probes, and anything sent before
+  the handshake is confirmed: copies bypass the sent packet handler, so they must not count against a server's
+  amplification limit. The send loops that copy run only after confirmation; the coalesced path checks it.
 - **Queue.** A copy is queued only when the send queue has room; otherwise it is skipped and counted, and the
   original is never held back for it. Delayed copies wait in a per-connection deadline queue of at most 256 KiB; a
   copy that does not fit is skipped and counted. The connection's timer covers the earliest deadline, and closing
