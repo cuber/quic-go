@@ -37,5 +37,6 @@ lists it as `HyNetworks/quic-go`; the old name redirects). Core uses it through 
 | ID | Spec | Status |
 |---|---|---|
 | [001](001-loss-recovery/spec.md) | Loss recovery and redundancy: `Config` fields for the delayed-ACK timer, ACK threshold, initial RTT, PTO backoff limit and loss thresholds; byte-identical copies of small and tail datagrams outside loss recovery; loss counted whatever the congestion controller, and new `ConnectionStats` counters. For [Core spec021](../../xray-core/spec/021-quic-loss-recovery/spec.md) | Approved 2026-11-07 |
+| [002](002-ack-progress/spec.md) | Acknowledgment progress: `ConnectionStats.PacketsAcked` (packets acknowledged, once each) and `BytesInFlight` (the sender's bytes in flight, read without the connection's lock). For [Core spec024](../../xray-core/spec/024-hy2-relay-session/spec.md) | Approved 2026-11-08 |
 
-Next spec: 002.
+Next spec: 003.

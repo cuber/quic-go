@@ -19,4 +19,8 @@ type ConnectionStats struct {
 	SpuriousLosses     atomic.Uint64
 	PTOCount           atomic.Uint64
 	DuplicatesReceived atomic.Uint64
+
+	// spec/002-ack-progress
+	PacketsAcked  atomic.Uint64
+	BytesInFlight atomic.Uint64 // a gauge, mirrored from the sent packet handler
 }

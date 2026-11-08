@@ -219,6 +219,7 @@ func (h *sentPacketHandler) removeFromBytesInFlight(p *packet) {
 			panic("negative bytes_in_flight")
 		}
 		h.bytesInFlight -= p.Length
+		h.connStats.BytesInFlight.Store(uint64(h.bytesInFlight))
 		p.includedInBytesInFlight = false
 	}
 }
@@ -345,6 +346,7 @@ func (h *sentPacketHandler) SentPacket(
 	if isAckEliciting {
 		pnSpace.lastAckElicitingPacketTime = t
 		h.bytesInFlight += size
+		h.connStats.BytesInFlight.Store(uint64(h.bytesInFlight))
 		p.includedInBytesInFlight = true
 		if h.numProbesToSend > 0 {
 			h.numProbesToSend--
@@ -455,6 +457,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	if err != nil || len(ackedPackets) == 0 {
 		return false, err
 	}
+	h.connStats.PacketsAcked.Add(uint64(len(ackedPackets))) // spec/002-ack-progress
 
 	cc := h.getCongestionControl()
 
@@ -1199,6 +1202,7 @@ func (h *sentPacketHandler) queueFramesForRetransmission(p *packet) {
 
 func (h *sentPacketHandler) ResetForRetry(now monotime.Time) {
 	h.bytesInFlight = 0
+	h.connStats.BytesInFlight.Store(0)
 	var firstPacketSendTime monotime.Time
 	for _, p := range h.initialPackets.history.Packets() {
 		if firstPacketSendTime.IsZero() {

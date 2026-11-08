@@ -884,6 +884,13 @@ type ConnectionStats struct {
 	// DuplicatesReceived is the number of packets dropped as (potentially) duplicate:
 	// copies and network duplicates. They are not included in PacketsReceived.
 	DuplicatesReceived uint64
+
+	// PacketsAcked is the number of sent packets the peer acknowledged, each counted once, when the
+	// acknowledgment first covers it (spec/002-ack-progress).
+	PacketsAcked uint64
+	// BytesInFlight is the sender's bytes in flight at this moment: ack-eliciting bytes sent and neither
+	// acknowledged nor declared lost (spec/002-ack-progress).
+	BytesInFlight uint64
 }
 
 func (c *Conn) ConnectionStats() ConnectionStats {
@@ -906,6 +913,9 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 		SpuriousLosses:     c.connStats.SpuriousLosses.Load(),
 		PTOCount:           c.connStats.PTOCount.Load(),
 		DuplicatesReceived: c.connStats.DuplicatesReceived.Load(),
+
+		PacketsAcked:  c.connStats.PacketsAcked.Load(),
+		BytesInFlight: c.connStats.BytesInFlight.Load(),
 	}
 }
 
